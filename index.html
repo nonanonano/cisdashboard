@@ -1,11 +1,472 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+  <meta charset="UTF-8" />
+  <title>cis流リアルタイム株式ダッシュボード</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f9f9f9; color: #333; }
+    h1 { font-size: 1.5em; margin-bottom: 0.5em; }
+    #indicators { margin-bottom: 1em; }
+    #indicators span { margin-right: 20px; font-weight: bold; }
+    #stockTable { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+    #stockTable th, #stockTable td { border: 1px solid #ccc; padding: 4px 8px; text-align: right; }
+    #stockTable th { background: #eaeaea; }
+    #stockTable td.symbol, #stockTable td.name { text-align: left; }
+    .pos { color: green; }
+    .neg { color: red; }
+    .rsi-high { color: red; font-weight: bold; }
+    .rsi-low { color: green; font-weight: bold; }
+  </style>
 </head>
 <body>
-    <h1>hello!github!!</h1>
+<h1>cis流リアルタイム株式ダッシュボード</h1>
+
+<!-- 指標表示エリア -->
+<div id="indicators">
+  <span id="nikkeiVal">日経平均 (1329 ETF): --</span>
+  <span id="topixVal">TOPIX (1306 ETF): --</span>
+  <span id="mothersVal">マザーズ (2516 ETF): --</span>
+  <span id="usdjpyVal">ドル円: --</span>
+  <span id="nikkeiViVal">日経VI: --</span>
+  <span id="us10yVal">米10年債利回り: --</span>
+  <span id="fearGreedVal">Fear&Greed: --</span>
+  <span id="advDeclVal">騰落レシオ: --</span>
+</div>
+
+<!-- 銘柄検索ボックス -->
+<input type="text" id="searchInput" placeholder="銘柄コードを入力 (例: 7203)" />
+<button id="searchBtn">Add</button>
+
+<!-- 株式データ表示テーブル -->
+<div id="stockTableContainer">
+  <table id="stockTable">
+    <thead>
+      <tr>
+        <th>コード</th>
+        <th>名称</th>
+        <th>株価</th>
+        <th>前日比%</th>
+        <th>出来高</th>
+        <th>MA25</th>
+        <th>RSI14</th>
+        <th>MACD</th>
+      </tr>
+    </thead>
+    <tbody id="stocksBody"></tbody>
+  </table>
+</div>
+
+<!-- cis判断コメント表示 -->
+<div id="cisComments">
+  <h3>cisコメント</h3>
+  <div id="commentsContent">特筆すべきシグナルはありません。</div>
+</div>
+
+<script>
+  // ** 設定: APIキーと初期銘柄リスト **
+  const API_KEY = " J4N9TSYBGGJZW0EU";  // ←ここにAlpha VantageのAPIキー文字列を入力
+  // 銘柄リスト（コードと名称）。30銘柄を対象。
+  const stockList = [
+    { symbol: "7203.T", name: "トヨタ" },
+    { symbol: "8306.T", name: "三菱UFJ" },
+    { symbol: "6758.T", name: "ソニーG" },
+    { symbol: "6501.T", name: "日立" },
+    { symbol: "6861.T", name: "キーエンス" },
+    { symbol: "9983.T", name: "ファーストリテ" },
+    { symbol: "8316.T", name: "三井住友FG" },
+    { symbol: "7974.T", name: "任天堂" },
+    { symbol: "9432.T", name: "NTT" },
+    { symbol: "4519.T", name: "中外製薬" },
+    { symbol: "6098.T", name: "リクルート" },
+    { symbol: "8058.T", name: "三菱商事" },
+    { symbol: "8766.T", name: "東京海上HD" },
+    { symbol: "7011.T", name: "三菱重工" },
+    { symbol: "9984.T", name: "ソフトバンクG" },
+    { symbol: "8001.T", name: "伊藤忠" },
+    { symbol: "8035.T", name: "東エレク" },
+    { symbol: "9434.T", name: "ソフトバンク(通信)" },
+    { symbol: "9433.T", name: "KDDI" },
+    { symbol: "8411.T", name: "みずほFG" },
+    { symbol: "4063.T", name: "信越化学" },
+    { symbol: "8031.T", name: "三井物産" },
+    { symbol: "2914.T", name: "JT" },
+    { symbol: "4568.T", name: "第一三共" },
+    { symbol: "4502.T", name: "武田薬品" },
+    { symbol: "6503.T", name: "三菱電機" },
+    { symbol: "7741.T", name: "HOYA" },
+    { symbol: "7267.T", name: "ホンダ" },
+    { symbol: "6702.T", name: "富士通" },
+    { symbol: "3382.T", name: "セブン＆アイ" }
+  ];
+  // インデックスETFリスト（日経平均・TOPIX・マザーズ）
+  const indexList = [
+    { symbol: "1329.T", name: "Nikkei225 ETF" },
+    { symbol: "1306.T", name: "TOPIX ETF" },
+    { symbol: "2516.T", name: "Mothers ETF" }
+  ];
+
+  // 内部データ格納用: 前日終値やテクニカル指標
+  const stockDataMap = {};  // symbol をキーに、prevClose, ma25, rsi14, macdHist などを格納
+  // DOM参照のマップ: symbol -> 各セル要素参照
+  const rowMap = {};
+
+  // 初期テーブル作成
+  const tbody = document.getElementById('stocksBody');
+  stockList.forEach(stock => {
+    const tr = document.createElement('tr');
+    // 各列セルを追加
+    const tdSymbol = document.createElement('td');
+    tdSymbol.className = "symbol";
+    tdSymbol.textContent = stock.symbol;
+    const tdName = document.createElement('td');
+    tdName.className = "name";
+    tdName.textContent = stock.name;
+    const tdPrice = document.createElement('td');
+    // Price cell will contain price value and arrow span
+    const priceValSpan = document.createElement('span');
+    priceValSpan.className = "priceVal";
+    priceValSpan.textContent = "--";
+    const priceArrowSpan = document.createElement('span');
+    priceArrowSpan.className = "priceArrow";
+    priceArrowSpan.textContent = "";  // arrow symbol will be added here
+    tdPrice.appendChild(priceValSpan);
+    tdPrice.appendChild(document.createTextNode(" "));
+    tdPrice.appendChild(priceArrowSpan);
+    const tdChange = document.createElement('td');
+    tdChange.textContent = "--";
+    const tdVol = document.createElement('td');
+    tdVol.textContent = "--";
+    const tdMA = document.createElement('td');
+    tdMA.textContent = "--";
+    const tdRSI = document.createElement('td');
+    tdRSI.textContent = "--";
+    const tdMACD = document.createElement('td');
+    tdMACD.textContent = "--";
+    // Append all tds to row
+    tr.appendChild(tdSymbol);
+    tr.appendChild(tdName);
+    tr.appendChild(tdPrice);
+    tr.appendChild(tdChange);
+    tr.appendChild(tdVol);
+    tr.appendChild(tdMA);
+    tr.appendChild(tdRSI);
+    tr.appendChild(tdMACD);
+    tbody.appendChild(tr);
+    // Save references for updating
+    rowMap[stock.symbol] = {
+      priceVal: priceValSpan,
+      priceArrow: priceArrowSpan,
+      change: tdChange,
+      volume: tdVol,
+      ma: tdMA,
+      rsi: tdRSI,
+      macd: tdMACD
+    };
+  });
+
+  // テクニカル指標計算関数: 単一銘柄の日次データからMA, RSI, MACDを算出
+  function computeIndicatorsFor(symbol, dailySeries) {
+    const closePrices = [];  // 過去株価の配列（古い→新しい順序）
+    for (let date in dailySeries) {
+      closePrices.push(parseFloat(dailySeries[date]["4. close"]));
+    }
+    closePrices.reverse();  // 古い順に並び替え
+    const n = closePrices.length;
+    if (n === 0) return;
+    // 前日終値（最新日データの終値）
+    const prevClose = closePrices[n-1];
+    // 25日移動平均
+    let ma25 = "--";
+    if (n >= 25) {
+      const last25 = closePrices.slice(n-25);
+      const sum25 = last25.reduce((a,b) => a + b, 0);
+      ma25 = (sum25 / 25).toFixed(2);
+    } else if (n > 0) {
+      // データ不足時は全期間平均
+      const sumAll = closePrices.reduce((a,b) => a + b, 0);
+      ma25 = (sumAll / n).toFixed(2);
+    }
+    // RSI14計算
+    let rsi14 = "--";
+    if (n >= 15) {
+      let gains = 0, losses = 0;
+      for (let i = n-14; i < n; i++) {
+        const diff = closePrices[i] - closePrices[i-1];
+        if (diff >= 0) gains += diff; else losses += (-diff);
+      }
+      gains /= 14;
+      losses /= 14;
+      if (losses === 0) {
+        rsi14 = 100.0;
+      } else {
+        const rs = gains / losses;
+        rsi14 = (100 - 100/(1+rs)).toFixed(1);
+      }
+    }
+    // MACD (12,26)とシグナル(9)計算
+    let macdHist = "--";
+    if (n >= 35) {
+      // EMA計算 ヘルパー関数
+      const calcEMA = (data, period) => {
+        const k = 2/(period+1);
+        let ema = data[0];
+        for (let i = 1; i < data.length; i++) {
+          ema = data[i] * k + ema * (1 - k);
+        }
+        return ema;
+      };
+      // 過去データを全部使ってEMA
+      const ema12 = calcEMA(closePrices, 12);
+      const ema26 = calcEMA(closePrices, 26);
+      const macdLine = ema12 - ema26;
+      // シグナルライン: MACDラインの9日EMA
+      // まずMACDライン配列を作成
+      const macdSeries = [];
+      for (let i = 0; i < closePrices.length; i++) {
+        const slice = closePrices.slice(0, i+1);
+        const e12 = calcEMA(slice, 12);
+        const e26 = calcEMA(slice, 26);
+        macdSeries.push(e12 - e26);
+      }
+      const signal = calcEMA(macdSeries, 9);
+      macdHist = (macdLine - signal).toFixed(2);
+      // MACDクロス判定のため直近2日も記録
+      if (macdSeries.length >= 2) {
+        const macd_yest = macdSeries[macdSeries.length-2];
+        const signal_yest = calcEMA(macdSeries.slice(0, macdSeries.length-1), 9);
+        stockDataMap[symbol].macdCrossUp = (macdLine > signal && macd_yest <= signal_yest);
+      }
+    }
+    // データ格納
+    stockDataMap[symbol].prevClose = prevClose;
+    stockDataMap[symbol].ma25 = ma25;
+    stockDataMap[symbol].rsi14 = rsi14;
+    stockDataMap[symbol].macdHist = macdHist;
+    // 表示に反映
+    const row = rowMap[symbol];
+    if (row) {
+      row.ma.textContent = ma25;
+      row.rsi.textContent = rsi14;
+      // RSI閾値で色付け
+      if (parseFloat(rsi14) >= 70) row.rsi.classList.add("rsi-high");
+      if (parseFloat(rsi14) <= 30) row.rsi.classList.add("rsi-low");
+      row.macd.textContent = macdHist;
+      // MACDヒストグラムが正なら緑、負なら赤表示
+      if (parseFloat(macdHist) > 0) row.macd.classList.add("pos");
+      if (parseFloat(macdHist) < 0) row.macd.classList.add("neg");
+    }
+  }
+
+  // 全銘柄の過去データ取得してテクニカル計算
+  let techCount = 0;
+  stockList.forEach(stock => {
+    const symbol = stock.symbol;
+    stockDataMap[symbol] = {};
+    const urlDaily = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=compact&apikey=${API_KEY}`;
+    fetch(urlDaily)
+      .then(res => res.json())
+      .then(data => {
+        const series = data["Time Series (Daily)"] || data["Weekly Time Series"] || data;
+        if (series) {
+          computeIndicatorsFor(symbol, series);
+        }
+      })
+      .catch(err => console.error("Daily fetch error for", symbol, err))
+      .finally(() => {
+        techCount++;
+        // 全銘柄分取得完了したらコメント更新
+        if (techCount === stockList.length) {
+          updateComments();
+        }
+      });
+  });
+
+  // コメント更新関数: cis判断シグナルをチェック
+  function updateComments() {
+    let comments = "";
+    stockList.forEach(stock => {
+      const sym = stock.symbol;
+      const data = stockDataMap[sym];
+      if (!data) return;
+      const name = stock.name;
+      // 出来高急増 + MACD好転
+      if (data.volumeSurge && data.macdCrossUp) {
+        comments += `<p>${name}: 出来高急増 + MACD好転 → cis：買い検討</p>`;
+      }
+      // RSI過熱/低下
+      const rsiVal = parseFloat(data.rsi14);
+      if (rsiVal >= 70) {
+        comments += `<p>${name}: RSI ${rsiVal}（過熱）→ cis：利確検討</p>`;
+      }
+      if (rsiVal <= 30) {
+        comments += `<p>${name}: RSI ${rsiVal}（割安）→ cis：買い検討</p>`;
+      }
+    });
+    if (comments === "") {
+      comments = "特筆すべきシグナルはありません。";
+    }
+    document.getElementById("commentsContent").innerHTML = comments;
+  }
+
+  // 銘柄のリアルタイム株価データ更新
+  function fetchStockQuotes() {
+    // 全銘柄シンボル文字列（指数ETF含む）をカンマ区切りで用意
+    const allSymbols = stockList.map(s => s.symbol).concat(indexList.map(i => i.symbol));
+    const query = allSymbols.join(",");
+    const url = `https://www.alphavantage.co/query?function=BATCH_STOCK_QUOTES&symbols=${query}&apikey=${API_KEY}`;
+    fetch(url)
+      .then(res => res.json())
+      .then(data => {
+        const quotes = data["Stock Quotes"] || data["Stock Quotes Batch"] || [];
+        quotes.forEach(q => {
+          const sym = q["1. symbol"];
+          const price = parseFloat(q["2. price"]);
+          const volume = q["3. volume"] ? parseInt(q["3. volume"]) : 0;
+          const timestamp = q["4. timestamp"] || "";
+          // インデックスETFの場合は指標エリアを更新
+          if (indexList.find(idx => idx.symbol === sym)) {
+            if (sym === "1329.T") {
+              // 日経平均ETF
+              document.getElementById("nikkeiVal").textContent = `日経平均 (1329 ETF): ${price.toFixed(2)}`;
+            }
+            if (sym === "1306.T") {
+              document.getElementById("topixVal").textContent = `TOPIX (1306 ETF): ${price.toFixed(2)}`;
+            }
+            if (sym === "2516.T") {
+              document.getElementById("mothersVal").textContent = `マザーズ (2516 ETF): ${price.toFixed(2)}`;
+            }
+            return;
+          }
+          // 株価テーブル更新
+          const row = rowMap[sym];
+          if (row) {
+            // 前回価格を取得（なければ初期値としてprevCloseを使用）
+            const prevPrice = parseFloat(row.priceVal.textContent) || stockDataMap[sym]?.prevClose || price;
+            // 価格表示更新
+            row.priceVal.textContent = price.toFixed(2);
+            // 価格変動矢印
+            if (price > prevPrice) {
+              row.priceArrow.textContent = "▲";
+              row.priceArrow.className = "priceArrow pos";
+            } else if (price < prevPrice) {
+              row.priceArrow.textContent = "▼";
+              row.priceArrow.className = "priceArrow neg";
+            } else {
+              row.priceArrow.textContent = "-";
+              row.priceArrow.className = "priceArrow";
+            }
+            // 前日比変化率（prevCloseから計算）
+            if (stockDataMap[sym]?.prevClose) {
+              const prevClose = stockDataMap[sym].prevClose;
+              const changePct = ((price - prevClose) / prevClose * 100).toFixed(2);
+              row.change.textContent = (changePct >= 0 ? "+" : "") + changePct + "%";
+              row.change.className = changePct >= 0 ? "pos" : "neg";
+            }
+            // 出来高
+            row.volume.textContent = volume ? volume.toLocaleString() : "--";
+            // 出来高急増フラグ更新: 前日比3倍以上の出来高
+            if (stockDataMap[sym]) {
+              const prevVol = stockDataMap[sym].prevVolume || volume;
+              stockDataMap[sym].volumeSurge = (volume >= 3 * prevVol);
+              // 更新後の出来高をprevVolumeに格納
+              stockDataMap[sym].prevVolume = volume;
+            }
+          }
+        });
+      })
+      .catch(err => console.error("Batch quotes fetch error:", err));
+  }
+
+  // 指標（為替・金利等）の更新
+  function fetchIndicators() {
+    // ドル円為替
+    fetch(`https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=USD&to_currency=JPY&apikey=${API_KEY}`)
+      .then(res => res.json())
+      .then(data => {
+        const rate = data["Realtime Currency Exchange Rate"]["5. Exchange Rate"];
+        if (rate) {
+          document.getElementById("usdjpyVal").textContent = `ドル円: ${parseFloat(rate).toFixed(3)}`;
+        }
+      });
+    // 米10年債利回り（デイリー最新値）
+    fetch(`https://www.alphavantage.co/query?function=TREASURY_YIELD&interval=daily&maturity=10year&apikey=${API_KEY}`)
+      .then(res => res.json())
+      .then(data => {
+        const records = data["data"];
+        if (records && records.length > 0) {
+          const latestYield = records[0]["value"];
+          document.getElementById("us10yVal").textContent = `米10年債利回り: ${parseFloat(latestYield).toFixed(2)}%`;
+        }
+      });
+    // Fear & Greed指数や騰落レシオは外部取得手段がないため、このコードでは更新しません（手動で更新可能とします）。
+  }
+
+  // 検索ボタン機能: 新規銘柄追加
+  document.getElementById("searchBtn").addEventListener("click", () => {
+    let code = document.getElementById("searchInput").value.trim();
+    if (!code) return;
+    // 入力を標準化（数字のみなら.T付与）
+    if (!code.includes(".")) {
+      if (/^\d+$/.test(code)) {
+        code += ".T";
+      }
+    }
+    // 既に存在するかチェック
+    if (stockList.find(s => s.symbol === code)) {
+      alert("既に監視リストに追加済みです。");
+      return;
+    }
+    // 新規銘柄追加
+    const newStock = { symbol: code, name: code };
+    stockList.push(newStock);
+    // テーブルに新規行を追加
+    const tr = document.createElement('tr');
+    const tdSymbol = document.createElement('td');
+    tdSymbol.className = "symbol";
+    tdSymbol.textContent = newStock.symbol;
+    const tdName = document.createElement('td');
+    tdName.className = "name";
+    tdName.textContent = newStock.name;
+    const tdPrice = document.createElement('td');
+    const priceValSpan = document.createElement('span');
+    priceValSpan.className = "priceVal";
+    priceValSpan.textContent = "--";
+    const priceArrowSpan = document.createElement('span');
+    priceArrowSpan.className = "priceArrow";
+    tdPrice.appendChild(priceValSpan);
+    tdPrice.appendChild(document.createTextNode(" "));
+    tdPrice.appendChild(priceArrowSpan);
+    const tdChange = document.createElement('td'); tdChange.textContent = "--";
+    const tdVol = document.createElement('td'); tdVol.textContent = "--";
+    const tdMA = document.createElement('td'); tdMA.textContent = "--";
+    const tdRSI = document.createElement('td'); tdRSI.textContent = "--";
+    const tdMACD = document.createElement('td'); tdMACD.textContent = "--";
+    tr.append(tdSymbol, tdName, tdPrice, tdChange, tdVol, tdMA, tdRSI, tdMACD);
+    document.getElementById("stocksBody").appendChild(tr);
+    rowMap[newStock.symbol] = {
+      priceVal: priceValSpan, priceArrow: priceArrowSpan,
+      change: tdChange, volume: tdVol, ma: tdMA, rsi: tdRSI, macd: tdMACD
+    };
+    stockDataMap[newStock.symbol] = {};
+    // 新規銘柄のテクニカル取得
+    fetch(`https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${newStock.symbol}&outputsize=compact&apikey=${API_KEY}`)
+      .then(res => res.json())
+      .then(data => {
+        const series = data["Time Series (Daily)"];
+        if (series) computeIndicatorsFor(newStock.symbol, series);
+      })
+      .finally(() => { updateComments(); });
+    // 新規銘柄も含めたバッチクエリリストを更新するため、以降のfetchStockQuotes内でallSymbolsに反映される
+    alert(`「${newStock.symbol}」を追加しました。`);
+  });
+
+  // データの定期更新開始
+  // 最初に一度指標取得と株価取得を実行
+  fetchIndicators();
+  fetchStockQuotes();
+  // インターバル設定
+  setInterval(fetchStockQuotes, 1000);   // 株価・出来高を1秒ごと更新
+  setInterval(fetchIndicators, 10000);   // マクロ指標を10秒ごと更新
+</script>
 </body>
 </html>
